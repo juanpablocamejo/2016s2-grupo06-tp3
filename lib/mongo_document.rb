@@ -1,6 +1,7 @@
 require 'mongo'
 require_relative 'mongo_db'
 require_relative 'dynamic_finders'
+require_relative 'errors'
 
 module MongoDocument
 
@@ -19,7 +20,7 @@ module MongoDocument
       hash
     end
 
-# ====== INSERT / REMOVE ====== #
+# ====== SAVE / UPDATE / REMOVE ====== #
     def save
       ## before_save hook ##
       before_save()
@@ -31,10 +32,20 @@ module MongoDocument
 
       ## after_save hook ##
       after_save()
+      self
+    end
+
+    def update
+      filter = {:_id => _id}
+      upd = to_hash.select { |k, v| k != :_id }
+      self.class.db_collection.update_one(filter, upd)
+      self
     end
 
     def remove
       self.class.db_collection.delete_one({:_id => _id})
+      self._id = nil
+      self
     end
 
     def after_save
@@ -53,6 +64,11 @@ module MongoDocument
       @collection_name = default_collection_name
       field :_id
       @on_populate_proc = nil
+      @validators = {
+          :required => Proc.new do |is_req, f_value, f_type|
+            raise Error::RequiredFieldError if is_req and f_value.nil?
+          end
+      }
     end
 
 # ====== QUERYS ====== #
@@ -94,14 +110,25 @@ module MongoDocument
       MongoDB.client.database.collection(collection_name)
     end
 
-# ====== FIELDS ====== #
+# ====== FIELDS / VALIDATIONS ====== #
 
-    def field(field_name, field_type=nil)
+    def field(field_name, field_type=Object, field_validations={})
       if !@fields.include?(field_name)
         @fields[field_name.to_sym] = field_type
         define_method(field_name) { instance_variable_get("@#{field_name}") }
-        define_method(("#{field_name}=").to_sym) { |v| instance_variable_set("@#{field_name}", v) }
+        define_method(("#{field_name}=").to_sym) do |field_value|
+          self.class.validate(field_value, field_type, field_validations)
+          instance_variable_set("@#{field_name}", field_value)
+        end
       end
+    end
+
+    def validate(field_value, field_type, field_validations)
+      raise Error::FieldTypeError unless field_value.nil? or field_value.is_a? field_type
+      field_validations.each {
+          |validation_key, validation_arg|
+        @validators[validation_key].call(validation_arg, field_value, field_type)
+      }
     end
 
     def fields
@@ -119,7 +146,8 @@ module MongoDocument
       end
       an_instance
     end
-    ## on_populate hook ##
+
+## on_populate hook ##
     def on_populate(&bk)
       @on_populate_proc = bk
     end
